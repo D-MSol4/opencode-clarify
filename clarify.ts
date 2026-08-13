@@ -685,7 +685,57 @@ async function handleModelCommand(api: Api, args: string[]): Promise<void> {
   toast(api, USAGE, "warning")
 }
 
-function resolveApiKey(provider: ProviderLike): string | undefined {
+async function resolveDbApiKey(providerID: string): Promise<string | undefined> {
+  try {
+    const dataDir = process.env.OPENCODE_DATA_DIR ?? path.join(os.homedir(), ".local", "share", "opencode")
+    const dbPath = path.join(dataDir, "opencode.db")
+
+    let raw: string | null = null
+    try {
+      const { DatabaseSync } = await import("node:sqlite")
+      const db = new DatabaseSync(dbPath, { readOnly: true })
+      try {
+        const row = db
+          .prepare("SELECT value FROM credential WHERE integration_id = ? AND (active IS NULL OR active = 1) LIMIT 1")
+          .get(providerID) as { value?: string | null } | undefined
+        raw = typeof row?.value === "string" && row.value ? row.value : null
+      } finally {
+        db.close()
+      }
+    } catch {
+      try {
+        const { Database } = await import("bun:sqlite")
+        const db = new Database(dbPath, { readonly: true })
+        try {
+          const row = db
+            .prepare("SELECT value FROM credential WHERE integration_id = ? AND (active IS NULL OR active = 1) LIMIT 1")
+            .get(providerID) as { value?: string | null } | undefined
+          raw = typeof row?.value === "string" && row.value ? row.value : null
+        } finally {
+          db.close()
+        }
+      } catch {
+        // no sqlite runtime available; fall through
+      }
+    }
+
+    if (!raw) return undefined
+    try {
+      const parsed = JSON.parse(raw) as { type?: unknown; key?: unknown }
+      if (parsed?.type === "key" && typeof parsed.key === "string" && parsed.key.length > 0) return parsed.key
+    } catch {
+      // not JSON; use the raw value below
+    }
+    return raw.trim().length > 0 ? raw.trim() : undefined
+  } catch {
+    return undefined
+  }
+}
+
+async function resolveApiKey(provider: ProviderLike): Promise<string | undefined> {
+  const dbKey = await resolveDbApiKey(provider.id ?? "")
+  if (dbKey) return dbKey
+
   const options = provider?.options ?? provider?.settings ?? {}
   for (const key of ["apiKey", "apikey", "api_key"]) {
     const value = options[key]
@@ -715,7 +765,7 @@ function resolveApiKey(provider: ProviderLike): string | undefined {
 async function callModelHttp(api: Api, resolved: ResolvedModel, text: string): Promise<string | null> {
   const provider = resolved.provider
   const model = resolved.model
-  const apiKey = resolveApiKey(provider)
+  const apiKey = await resolveApiKey(provider)
   if (!apiKey) return null
 
   const options = provider?.options ?? provider?.settings ?? {}
